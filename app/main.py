@@ -24,7 +24,7 @@ from .notify import push
 from .platforms import opentable
 from .platforms.base import PlatformError
 from .platforms.resy import ResyClient
-from .platforms.sevenrooms import parse_slug as sr_parse_slug
+from .platforms.sevenrooms import guest_details, save_guest_details
 from .safety import BudgetExhausted, PlatformPaused, governor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -125,6 +125,10 @@ async def status():
             "pause_reason": governor.pause_reason(p) if pu > time.time() else None,
         }
     platforms["resy"]["auth"] = ResyClient().auth_status()
+    g = guest_details()
+    platforms["sevenrooms"]["guest"] = (
+        {"name": f"{g['first_name']} {g['last_name']}", "email": g["email"],
+         "phone": f"+{g['dial_code']} {g['phone']}"} if g else None)
     active = db.list_requests(["monitoring"])
     return {
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -184,6 +188,31 @@ async def test_resy():
         return {"ok": True, "user": await ResyClient().load_user()}
     except Exception as e:
         raise _err(e)
+
+
+class GuestIn(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    phone: str
+    dial_code: str = "1"
+    country_code: str = "us"
+
+
+@app.post("/api/settings/guest", dependencies=[Depends(require_auth)])
+async def save_guest(body: GuestIn):
+    try:
+        d = save_guest_details(body.first_name, body.last_name, body.email, body.phone,
+                               body.dial_code, body.country_code)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "name": f"{d['first_name']} {d['last_name']}"}
+
+
+@app.delete("/api/settings/guest", dependencies=[Depends(require_auth)])
+async def delete_guest():
+    db.kv_delete("guest:details")
+    return {"ok": True}
 
 
 class NtfyIn(BaseModel):
@@ -327,7 +356,7 @@ def _build(body: RequestIn) -> dict[str, Any]:
         v["monitor_until"] = _local_to_utc_iso(v["monitor_until"], tz)
     if body.poll_interval_seconds is not None:
         v["poll_interval_seconds"] = max(settings.min_poll_seconds, body.poll_interval_seconds)
-    if body.platform != "resy":
+    if body.platform not in ("resy", "sevenrooms"):
         v["auto_book"] = False
     return v
 

@@ -41,7 +41,8 @@ class Transport:
 
     async def request(self, method: str, url: str, *, headers: dict[str, str] | None = None,
                       params: dict[str, Any] | None = None, data: Any = None, json_body: Any = None,
-                      cookies: dict[str, str] | None = None, timeout: float = 10.0) -> Response:
+                      cookies: dict[str, str] | None = None, timeout: float = 10.0,
+                      multipart: dict[str, str] | None = None) -> Response:
         raise NotImplementedError
 
     async def close(self) -> None:
@@ -67,9 +68,17 @@ class CurlTransport(Transport):
             return self._session
 
     async def request(self, method, url, *, headers=None, params=None, data=None, json_body=None,
-                      cookies=None, timeout=10.0) -> Response:
+                      cookies=None, timeout=10.0, multipart=None) -> Response:
         s = await self._get()
         kwargs: dict[str, Any] = {"headers": headers or {}, "timeout": timeout}
+        mime = None
+        if multipart:
+            from curl_cffi import CurlMime
+
+            mime = CurlMime()
+            for k, v in multipart.items():
+                mime.addpart(name=k, data=str(v).encode())
+            kwargs["multipart"] = mime
         if params:
             kwargs["params"] = params
         if data is not None:
@@ -78,7 +87,11 @@ class CurlTransport(Transport):
             kwargs["json"] = json_body
         if cookies:
             kwargs["cookies"] = cookies
-        r = await s.request(method, url, **kwargs)
+        try:
+            r = await s.request(method, url, **kwargs)
+        finally:
+            if mime is not None:
+                mime.close()
         try:
             ck = {c.name: c.value for c in r.cookies.jar}  # type: ignore[attr-defined]
         except Exception:

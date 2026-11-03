@@ -228,7 +228,7 @@ async function renderDetail(id) {
   $topRight.replaceChildren(el("a", { class: "btn ghost", href: "#/", style: "min-height:36px;padding:6px 12px" }, "Back"));
   const rows = [
     ["Platform", PLATFORM_NAMES[r.platform]],
-    ["Mode", MODE_NAMES[r.mode] + (r.platform === "resy" ? (r.auto_book ? " · auto-book" : " · notify only") : " · notify + link")],
+    ["Mode", MODE_NAMES[r.mode] + (r.platform !== "opentable" ? (r.auto_book ? " · auto-book" : " · notify only") : " · notify + link")],
     ["Party", `${r.party_size}`],
     ["Dates", r.dates.map(fmtDate).join(", ")],
     ["Time window", `${fmtTime(r.time_start)} – ${fmtTime(r.time_end)}${r.ideal_time ? ` (ideal ${fmtTime(r.ideal_time)})` : ""}`],
@@ -242,6 +242,7 @@ async function renderDetail(id) {
 
   const result = [];
   if (r.status === "booked") result.push(el("div", { class: "notice ok" }, `Booked ${fmtDate(r.booked_date)} at ${fmtTime(r.booked_time)}${r.booked_seating ? ` (${r.booked_seating})` : ""} — confirmation ${r.confirmation}`));
+  if (r.status === "booked" && r.platform === "sevenrooms") result.push(el("div", { class: "muted small" }, "To cancel or change it, use the link in the confirmation email from the restaurant (via SevenRooms)."));
   if (r.status === "found") result.push(el("div", { class: "notice ok" }, `Found ${fmtDate(r.booked_date)} at ${fmtTime(r.booked_time)}. Tap “Open booking page” to grab it.`));
   if (r.last_error && !["booked", "cancelled"].includes(r.status)) result.push(el("div", { class: "notice bad" }, r.last_error));
 
@@ -325,6 +326,7 @@ function blankDraft() {
 
 async function renderNew(editId) {
   setTitle(editId ? "Edit request" : "New request");
+  if (!state.status) state.status = await api("/api/status").catch(() => null);
   let d;
   if (editId) {
     const r = await api(`/api/requests/${editId}`);
@@ -364,7 +366,7 @@ function venuePicker(d, redraw) {
     q.placeholder = { resy: "Restaurant name, or paste a resy.com link", sevenrooms: "Paste sevenrooms.com link or venue slug", opentable: "Paste opentable.com/r/… link" }[d.platform];
     hint.textContent = {
       resy: "Resy: full auto-booking supported.",
-      sevenrooms: "SevenRooms: we watch availability and push you a link to finish booking (they often need a card).",
+      sevenrooms: "SevenRooms (also what DoorDash Reservations uses): auto-books tables that don't need a card, using your booking details from Settings. Card-required tables get a one-tap link.",
       opentable: "OpenTable: we never touch their servers (aggressive bot detection). You get a 60-second warning and a one-tap link at release time. Also turn on OpenTable's own “Notify me” in their app.",
     }[d.platform];
   };
@@ -445,7 +447,14 @@ function configForm(d, editId) {
     out.push(el("label", {}, "Skip seating types containing (comma separated)"),
       el("input", { type: "text", value: d.seating_exclude, placeholder: "e.g. bar, counter, patio", oninput: e => (d.seating_exclude = e.target.value) }));
   }
+  const isSR = d.platform === "sevenrooms";
   if (isResy) out.push(sw("Auto-book", "Off = just push me a link", d.auto_book, x => (d.auto_book = x)));
+  if (isSR) {
+    out.push(sw("Auto-book (no-card tables)", "Card-required tables always get a link instead", d.auto_book, x => (d.auto_book = x)));
+    if (state.status && state.status.platforms && !state.status.platforms.sevenrooms.guest) {
+      out.push(el("a", { class: "notice", href: "#/settings", style: "display:block;text-decoration:none" }, "Add your booking details (name, email, phone) in Settings so SevenRooms can auto-book →"));
+    }
+  }
 
   // Release time
   const relIn = el("input", { type: "datetime-local", value: d.release_local, oninput: e => (d.release_local = e.target.value) });
@@ -491,7 +500,7 @@ function configForm(d, editId) {
       venue_tz: v.timezone || null, venue_url: v.url || null,
       party_size: d.party_size, dates: d.dates, time_start: d.time_start, time_end: d.time_end, ideal_time: d.ideal_time || null,
       seating_exclude: (d.seating_exclude || "").split(",").map(s => s.trim()).filter(Boolean),
-      auto_book: isResy && d.auto_book,
+      auto_book: (isResy || isSR) && d.auto_book,
       release_local: (d.mode === "snipe" || isOT) ? (d.release_local || null) : null,
       snipe_window_seconds: d.snipe_window_seconds, fallback_to_monitor: !isOT && d.fallback_to_monitor,
       poll_interval_seconds: d.poll_interval_seconds, monitor_until: d.monitor_until || null, notes: d.notes || null,
@@ -517,6 +526,7 @@ function selectEl(options, value, onChange) {
 async function renderSettings() {
   setTitle("Settings");
   const st = await api("/api/status");
+  state.status = st;
   const resy = st.platforms.resy;
   const out = [];
 
@@ -547,6 +557,24 @@ async function renderSettings() {
   }
   rc.append(el("div", { class: "btns" }, btns));
   out.push(rc);
+
+  // Guest details for SevenRooms
+  out.push(el("div", { class: "section-title" }, "Your booking details (SevenRooms)"));
+  const gc = el("div", { class: "card" });
+  const guest = st.platforms.sevenrooms.guest;
+  const gf = el("input", { type: "text", placeholder: "First name", autocomplete: "given-name" });
+  const gl = el("input", { type: "text", placeholder: "Last name", autocomplete: "family-name" });
+  const ge = el("input", { type: "email", placeholder: "Email", autocomplete: "email" });
+  const gp = el("input", { type: "tel", placeholder: "Mobile number", autocomplete: "tel-national" });
+  const gs = el("button", { class: "btn primary block", style: "margin-top:10px" }, guest ? "Update details" : "Save details");
+  gs.onclick = () => busy(gs, async () => { await api("/api/settings/guest", { method: "POST", body: { first_name: gf.value, last_name: gl.value, email: ge.value, phone: gp.value } }); toast("Saved"); route(); });
+  gc.append(...[
+    el("div", { class: "muted" }, guest ? `Saved: ${guest.name} · ${guest.email} · ${guest.phone}` : "Not set. SevenRooms tables will be sent to you as links until you add these."),
+    el("div", { class: "muted small", style: "margin-top:6px" }, "SevenRooms has no login. Bookings are a guest checkout using these details, and the restaurant emails your confirmation. Stored encrypted on your server. US numbers only for now."),
+    el("div", { class: "grid2" }, el("div", {}, el("label", {}, "First name"), gf), el("div", {}, el("label", {}, "Last name"), gl)),
+    el("label", {}, "Email"), ge, el("label", {}, "Mobile"), gp, gs,
+  ]);
+  out.push(gc);
 
   // Notifications
   out.push(el("div", { class: "section-title" }, "Push notifications (ntfy)"));

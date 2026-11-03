@@ -143,3 +143,32 @@ async def test_tick_expires_past_dates():
     r = base_req(mode="monitor", status="monitoring", dates=["2001-01-01"], release_at=None)
     await Engine(resy=FakeResy([[]])).tick()
     assert db.get_request(r["id"])["status"] == "expired"
+
+
+class FakeSR(FakeResy):
+    async def find(self, slug, day, party, around="19:00", urgent=False):
+        return await FakeResy.find(self, slug, day, party, urgent=urgent)
+
+
+def sr_slot(t, bookable=True):
+    return Slot("sevenrooms", "2099-01-01", t, "Dining Room", token="ACC", bookable=bookable,
+                link="https://www.sevenrooms.com/explore/x/reservations/create/search/")
+
+
+@pytest.mark.asyncio
+async def test_sevenrooms_monitor_auto_books_no_card_slot():
+    r = base_req(platform="sevenrooms", mode="monitor", status="monitoring", release_at=None, auto_book=True)
+    sr = FakeSR([[sr_slot("19:30", bookable=False), sr_slot("20:00")]], [Booking("SR1")])
+    await Engine(resy=FakeResy([[]]), sevenrooms=sr).check_monitor(r["id"])
+    out = db.get_request(r["id"])
+    assert out["status"] == "booked" and out["booked_time"] == "20:00" and out["confirmation"] == "SR1"
+    assert [s.time for s in sr.booked] == ["20:00"]
+
+
+@pytest.mark.asyncio
+async def test_sevenrooms_card_only_slots_notify():
+    r = base_req(platform="sevenrooms", mode="monitor", status="monitoring", release_at=None, auto_book=True)
+    sr = FakeSR([[sr_slot("19:30", bookable=False)]])
+    await Engine(resy=FakeResy([[]]), sevenrooms=sr).check_monitor(r["id"])
+    out = db.get_request(r["id"])
+    assert out["status"] == "found" and "card" in out["last_error"] and sr.booked == []

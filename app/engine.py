@@ -32,12 +32,13 @@ from .platforms.base import (
     SlotGone,
 )
 from .platforms.resy import ResyClient
-from .platforms.sevenrooms import SevenRoomsClient
+from .platforms.sevenrooms import SevenRoomsClient, guest_details
 from .safety import BudgetExhausted, PlatformPaused, effective_poll_interval, governor
 
 log = logging.getLogger("rezzie.engine")
 
 ACTIVE = ("scheduled", "attempting", "monitoring")
+PLATFORM_NAMES = {"resy": "Resy", "sevenrooms": "SevenRooms", "opentable": "OpenTable"}
 LOOP_SECONDS = 5
 PREAUTH_SECONDS = 300      # verify login + payment method 5 min before a snipe
 MAX_SLOTS_PER_ATTEMPT = 3  # try at most this many matching slots per find
@@ -144,40 +145,46 @@ class Engine:
     async def _act_on_matches(self, req: dict[str, Any], matches: list[Slot]) -> bool:
         """Book (or notify) the best match. Returns True when the request is resolved."""
         rid = req["id"]
-        can_book = req["platform"] == "resy" and req.get("auto_book")
-        if not can_book:
+        name = PLATFORM_NAMES.get(req["platform"], req["platform"])
+        auto = bool(req.get("auto_book")) and req["platform"] in ("resy", "sevenrooms")
+        bookable = [m for m in matches if m.bookable] if auto else []
+        if not bookable:
             s = matches[0]
             others = ", ".join(f"{m.time}" for m in matches[1:4])
+            note = "Needs a card — finish by hand" if auto else None
             db.update_request(rid, status="found", booked_date=s.date, booked_time=s.time,
-                              booked_seating=s.seating, found_link=s.link)
-            db.log_event(rid, f"Found {s.date} {s.time} {s.seating}".strip())
+                              booked_seating=s.seating, found_link=s.link, last_error=note)
+            db.log_event(rid, f"Found {s.date} {s.time} {s.seating}".strip() + (f" ({note})" if note else ""))
             await push(f"Table found: {req['venue_name']}",
                        f"{s.date} at {s.time} for {req['party_size']}"
                        + (f" ({s.seating})" if s.seating else "")
-                       + (f". Also: {others}" if others else "") + ". Tap to book.",
+                       + (f". Also: {others}" if others else "")
+                       + (". Needs a card, so tap to book." if note else ". Tap to book."),
                        link=s.link, priority=5, tags=["fork_and_knife", "rotating_light"], request_id=rid)
             return True
 
+        client = self.resy if req["platform"] == "resy" else self.sr
         async with self._book_lock:
-            for s in matches[:MAX_SLOTS_PER_ATTEMPT]:
+            for s in bookable[:MAX_SLOTS_PER_ATTEMPT]:
                 # Human-ish pause between seeing a slot and clicking it.
                 await asyncio.sleep(random.uniform(0.15, 0.45))
                 try:
-                    b = await self.resy.book(s, req["party_size"])
+                    b = await client.book(s, req["party_size"])
                 except SlotGone as e:
                     db.log_event(rid, f"{s.time} gone before booking ({e}); trying next")
                     continue
-                except PaymentRequired:
+                except PaymentRequired as e:  # includes "needs a human" cases
                     db.update_request(rid, status="found", booked_date=s.date, booked_time=s.time,
                                       booked_seating=s.seating, found_link=s.link,
-                                      last_error="Venue needs a card/deposit — finish in Resy")
+                                      last_error=f"{e} — finish in {name}")
+                    db.log_event(rid, f"Found {s.date} {s.time} but can't auto-book: {e}", "warn")
                     await push(f"Almost! {req['venue_name']}",
-                               f"{s.date} {s.time} is open but needs a card/deposit. Tap to finish in Resy.",
-                               link=s.link, priority=5, tags=["credit_card"], request_id=rid)
+                               f"{s.date} {s.time} is open. {e}. Tap to finish in {name}.",
+                               link=s.link, priority=5, tags=["raised_hand"], request_id=rid)
                     return True
                 db.update_request(rid, status="booked", booked_date=s.date, booked_time=s.time,
                                   booked_seating=s.seating, confirmation=b.confirmation,
-                                  booking_token=b.token, found_link=s.link, last_error=None)
+                                  booking_token=b.token or None, found_link=s.link, last_error=None)
                 db.log_event(rid, f"BOOKED {s.date} {s.time} {s.seating} — confirmation {b.confirmation}")
                 await push(f"Booked: {req['venue_name']}",
                            f"{s.date} at {s.time} for {req['party_size']}"
@@ -265,6 +272,11 @@ class Engine:
                 db.log_event(rid, f"Pre-flight problem: {e}", "warn")
                 await push("Snipe pre-flight problem", f"{req['venue_name']}: {e}", priority=4,
                            tags=["warning"], request_id=rid)
+        if req["platform"] == "sevenrooms" and req.get("auto_book") and not guest_details():
+            db.log_event(rid, "Pre-flight: no booking details saved — will notify instead of booking", "warn")
+            await push("Add your booking details", f"{req['venue_name']}: SevenRooms auto-book needs your name, "
+                       "email and phone (Rezzie → Settings). Until then you'll get a link instead.",
+                       priority=4, tags=["warning"], request_id=rid)
 
         # 2) Fire at T+50ms (firing early just returns the old, empty grid).
         #    Keep monitors off this platform around the burst.

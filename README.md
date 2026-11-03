@@ -16,9 +16,11 @@ Rezzie updates the **Reservation Sniper** plan, which was a SwiftUI iOS app with
 
 | | Resy | SevenRooms | OpenTable |
 |---|---|---|---|
-| **Snipe the drop** (fire the instant reservations open) | ✅ auto-books in about a second | ✅ detects the drop and pushes you a one-tap link | ⏰ 60-second warning, then a one-tap link at release |
-| **Watch for cancellations** | ✅ auto-book or notify | ✅ notify with link | ➖ use OpenTable's built-in *Notify me* instead |
-| **Login needed** | Your Resy account | None (public widget) | None (we never contact OpenTable) |
+| **Snipe the drop** (fire the instant reservations open) | ✅ auto-books in about a second | ✅ auto-books no-card tables; card-required ones get a one-tap link | ⏰ 60-second warning, then a one-tap link at release |
+| **Watch for cancellations** | ✅ auto-book or notify | ✅ auto-book (no-card) or notify | ➖ use OpenTable's built-in *Notify me* instead |
+| **Login needed** | Your Resy account | None: guest checkout with your saved name, email and phone | None (we never contact OpenTable) |
+
+**SevenRooms and DoorDash:** DoorDash bought SevenRooms in 2025, and the DoorDash app's Reservations tab sells the same SevenRooms tables. Rezzie books those tables directly through SevenRooms' own reservation widget instead of the DoorDash app. That way your DoorDash account is never involved, and only DashPass-exclusive tables are out of reach (use DoorDash's in-app Notify for those).
 
 Every request has:
 - One or more dates
@@ -48,7 +50,7 @@ Every request has:
 | Cancellation polling | `/4/find` for every date, every 10–30 s | `/4/venue/calendar` first: one call checks every date, and `/4/find` runs only on dates that show availability. 60 s minimum. |
 | User-Agent | "Rotate User-Agent strings" | **Never rotate.** Rotating the UA on one logged-in account is a classic bot tell. One stable, real Chrome TLS fingerprint (curl_cffi). |
 | OpenTable | GraphQL `/dapi/fe/gql` scraping | **Never contacted.** Akamai Bot Manager now blocks every non-browser client, even TLS-impersonating ones and headless Chrome, and the persisted-query hashes rotate. You get reminders and deep links instead. |
-| SevenRooms | Not in the plan | Public widget availability endpoint (no login) with deep-link alerts |
+| SevenRooms | Not in the plan | Public widget (no login): `ng/widget/range` availability, then auto-booking via a 5-minute hold (`/api-yoa/dining/hold/add`) and the guest booking form. Only `type: book` times count as tables, and tables flagged `require_credit_card` are never automated. |
 | Notifications | iOS local notifications | ntfy push with "Open" action buttons |
 
 ## Account safety
@@ -172,7 +174,7 @@ Restarts take under a minute. Your data, logins and secrets live on Fly and are 
 
   Five minutes before the release it checks your login and card. At T+50 ms it starts.
 - **Watch for cancellations:** New → choose *Watch cancellations*. You can add up to 21 dates.
-- **SevenRooms:** paste the venue's `sevenrooms.com/reservations/<venue>` (or `/explore/<venue>/…`) link.
+- **SevenRooms:** paste the venue's `sevenrooms.com/reservations/<venue>` (or `/explore/<venue>/…`) link. To auto-book, first fill in **Settings → Your booking details** (name, email, mobile). Confirmations come from the restaurant by email, and you cancel using the link in that email.
 - **OpenTable:** paste the `opentable.com/r/<restaurant>` link and set the release time. You'll get a push 60 s before, and a "GO" push at release that opens the right page and party size.
 
 ## Configuration
@@ -226,7 +228,7 @@ app/
   db.py              SQLite (on the Fly volume)
   platforms/
     resy.py          Resy client (auth, refresh, search, calendar, find, details, book, cancel)
-    sevenrooms.py    public widget availability
+    sevenrooms.py    public widget availability + guest hold/book
     opentable.py     deep links only, no network calls
     http.py          curl_cffi Chrome-fingerprint transport
 web/                 mobile web app (vanilla JS PWA)
@@ -236,6 +238,7 @@ tests/               pytest suite with a fake transport (no real network)
 ## Known limits
 
 - These are unofficial, undocumented APIs. Resy can change endpoint shapes, rotate its key or tighten its WAF without notice. Failures show up in the activity log and as push alerts. `RESY_API_KEY` lets you swap the key without a code change.
-- Venues that require a deposit or card confirmation may stop at "Found — finish in Resy", and you get a link.
+- Venues that require a deposit or card confirmation stop at "Found — finish in Resy/SevenRooms", and you get a link. If SevenRooms ever shows a captcha at booking, Rezzie stops and sends the link too; it never tries to solve one.
+- SevenRooms' booking requests come from public captures of the widget, not from live testing by me. The first real SevenRooms auto-booking is the live test, so check the activity log and your email.
 - Rezzie can't know a venue's release *time of day* automatically; you set it per request.
 - It runs as a single machine by design. Don't scale it to more than one.

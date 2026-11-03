@@ -43,11 +43,12 @@ class FakeTransport(Transport):
         self.routes.setdefault((method, path), []).append(r)
 
     async def request(self, method, url, *, headers=None, params=None, data=None, json_body=None,
-                      cookies=None, timeout=10.0):
+                      cookies=None, timeout=10.0, multipart=None):
         from urllib.parse import urlparse
         path = urlparse(url).path
         self.calls.append({"method": method, "path": path, "headers": headers or {}, "params": params,
-                           "data": data, "json": json_body, "cookies": cookies})
+                           "data": data, "json": json_body, "cookies": cookies,
+                           "multipart": multipart})
         q = self.routes.get((method, path))
         if not q:
             return Response(404, "{}", {}, {})
