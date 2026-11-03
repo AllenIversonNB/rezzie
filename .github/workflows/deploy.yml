@@ -1,0 +1,30 @@
+name: Deploy to Fly.io
+# Runs on every push to main (after tests) and on demand from the Actions tab.
+# Needs a repo secret FLY_API_TOKEN (fly tokens create deploy). Without it, this
+# workflow is skipped.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: env.FLY_API_TOKEN != ''
+        with:
+          python-version: "3.12"
+      - name: Test
+        if: env.FLY_API_TOKEN != ''
+        run: pip install -r requirements-dev.txt && python -m pytest -q
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: env.FLY_API_TOKEN != ''
+      - name: Deploy (single machine)
+        if: env.FLY_API_TOKEN != ''
+        run: flyctl deploy --remote-only --ha=false
