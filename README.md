@@ -87,40 +87,69 @@ Other things that help:
 
 ---
 
-## Deploy (about 15 minutes, one time)
+## Deploy from a Windows PC (about 20 minutes, one time)
 
-You need a Fly.io account (it asks for a card; this app costs about $2–5/month) and a computer with a terminal for setup. After that, everything happens from your phone.
+Your PC is only used to **send setup commands** to Fly.io. Rezzie itself runs on a small Linux server that Fly rents you (about $2–5/month), and you use it from your phone's browser. After setup, the PC can be off.
 
-1. **Install flyctl and log in.**
-   ```bash
-   brew install flyctl
+All commands below go in **Windows PowerShell**: press the Windows key, type `PowerShell`, and press Enter. Paste one command at a time and press Enter. (On a Mac, the same `fly` commands work in Terminal.)
+
+1. **Create a Fly account** at https://fly.io/app/sign-up and add a credit card under Billing.
+2. **Install Git and the Fly tool.**
+   ```powershell
+   winget install --id Git.Git -e
    ```
-   ```bash
+   ```powershell
+   iwr https://fly.io/install.ps1 -useb | iex
+   ```
+   Then **close PowerShell and open a new one** so Windows picks up both tools.
+3. **Log in to Fly.** A browser window opens; confirm there.
+   ```powershell
    fly auth login
    ```
-2. **Create the app and its storage**, from this repo's folder. Pick a unique name and keep the existing `fly.toml` when asked.
-   ```bash
-   fly launch --no-deploy --copy-config --name rezzie-yourname --region ewr
+4. **Download the code** and go into its folder.
+   ```powershell
+   git clone -b claude/affectionate-ramanujan-514j2r https://github.com/AllenIversonNB/rezzie.git
    ```
-   ```bash
+   ```powershell
+   cd rezzie
+   ```
+5. **Create the app.** Replace `rezzie-jf` with a unique name (lowercase letters, numbers, dashes). If it asks to tweak settings, answer `N`.
+   ```powershell
+   fly launch --no-deploy --copy-config --name rezzie-jf --region ewr
+   ```
+6. **Create the 1 GB database disk.** If it warns about having a single volume, answer `y`.
+   ```powershell
    fly volumes create rezzie_data --region ewr --size 1
    ```
-3. **Set secrets.** Pick your own password. `NTFY_TOPIC` should be long and random, because anyone who knows it can read your alerts.
-   ```bash
-   fly secrets set APP_PASSWORD='a-long-password' SECRET_KEY="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')" NTFY_TOPIC="rezzie-$(python3 -c 'import secrets;print(secrets.token_hex(8))')" PUBLIC_URL=https://rezzie-yourname.fly.dev
+7. **Generate a random notification topic and secret key.** Write down the topic it prints.
+   ```powershell
+   $r=[Security.Cryptography.RandomNumberGenerator]::Create(); $b=New-Object byte[] 8; $r.GetBytes($b); $TOPIC="rezzie-"+(($b|%{$_.ToString("x2")}) -join ""); $k=New-Object byte[] 48; $r.GetBytes($k); $SECRET=[Convert]::ToBase64String($k); $TOPIC
    ```
-   You can also put your Resy login here (`RESY_EMAIL` / `RESY_PASSWORD`) instead of entering it in the app.
-4. **Deploy as exactly one machine.** The scheduler and database live in one process.
-   ```bash
-   fly deploy --ha=false
+8. **Store your private settings on Fly.** Change the password, and change `rezzie-jf` if you used a different name. `DRY_RUN=1` means nothing is really booked until you turn it off in step 12.
+   ```powershell
+   fly secrets set APP_PASSWORD="MyLongPassword123" SECRET_KEY="$SECRET" NTFY_TOPIC="$TOPIC" PUBLIC_URL=https://rezzie-jf.fly.dev DRY_RUN=1
    ```
-5. **On your iPhone:**
-   1. Open `https://rezzie-yourname.fly.dev` in Safari, then **Share → Add to Home Screen**.
-   2. Open it and enter your `APP_PASSWORD`.
-   3. **Settings → Resy account**: connect. You'll see "Card on file ✓" if Resy has a payment method.
-   4. Install **ntfy** from the App Store, tap **+** and subscribe to your `NTFY_TOPIC`. Then tap **Send test** in Settings.
+9. **Build and start it on Fly's servers.** No Docker is needed on your PC. Takes about 3 minutes.
+   ```powershell
+   fly deploy --ha=false --remote-only
+   ```
+10. **On your iPhone:**
+    1. Open `https://rezzie-jf.fly.dev` in Safari, then **Share → Add to Home Screen → Add**.
+    2. Open Rezzie from the Home Screen and enter your password.
+    3. **Settings → Resy account**: enter your Resy login and tap **Connect Resy**.
+    4. Install **ntfy** from the App Store, tap **+**, subscribe to your topic, and allow notifications. Then tap **Send test** in Rezzie's Settings.
+11. **Test** with a "Watch cancellations" request and check its activity log.
+12. **Go live** (real bookings) from PowerShell in the `rezzie` folder:
+    ```powershell
+    fly secrets unset DRY_RUN
+    ```
 
-**Optional auto-deploy:** run `fly tokens create deploy` and add the result as a GitHub repo secret named `FLY_API_TOKEN`. Every push to `main` then runs the tests and deploys.
+**Updating later:** from PowerShell in the `rezzie` folder:
+```powershell
+git pull; fly deploy --ha=false --remote-only
+```
+
+**Optional auto-deploy:** once this branch is merged into `main`, run `fly tokens create deploy` and save the token as a GitHub repo secret named `FLY_API_TOKEN` (repo → Settings → Secrets and variables → Actions). Every push to `main` then tests and deploys automatically.
 
 ## Using it
 
