@@ -1,6 +1,6 @@
-# Fly.io config. Change `app` to something unique (e.g. rezzie-yourinitials)
-# or let `fly launch` rename it. See README → Deploy.
-app = "rezzie-CHANGE-ME"
+# Fly.io config. The auto-deploy workflow deploys to the app named here.
+# If you ever rename the Fly app, change this line too.
+app = "rezzie-jf"
 primary_region = "ewr"   # Newark: close to NYC restaurants and Resy's servers
 
 [build]

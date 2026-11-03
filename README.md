@@ -113,7 +113,7 @@ All commands below go in **Windows PowerShell**: press the Windows key, type `Po
    ```powershell
    cd rezzie
    ```
-5. **Create the app.** Replace `rezzie-jf` with a unique name (lowercase letters, numbers, dashes). If it asks to tweak settings, answer `N`.
+5. **Create the app.** Use the name `rezzie-jf`; the auto-update workflow deploys to the app named in `fly.toml`. If Fly says the name is taken, pick another and change the `app = "…"` line in `fly.toml` on GitHub to match. If it asks to tweak settings, answer `N`.
    ```powershell
    fly launch --no-deploy --copy-config --name rezzie-jf --region ewr
    ```
@@ -125,7 +125,7 @@ All commands below go in **Windows PowerShell**: press the Windows key, type `Po
    ```powershell
    $r=[Security.Cryptography.RandomNumberGenerator]::Create(); $b=New-Object byte[] 8; $r.GetBytes($b); $TOPIC="rezzie-"+(($b|%{$_.ToString("x2")}) -join ""); $k=New-Object byte[] 48; $r.GetBytes($k); $SECRET=[Convert]::ToBase64String($k); $TOPIC
    ```
-8. **Store your private settings on Fly.** Change the password, and change `rezzie-jf` if you used a different name. `DRY_RUN=1` means nothing is really booked until you turn it off in step 12.
+8. **Store your private settings on Fly.** Change the password (and `rezzie-jf` if you used a different name). `DRY_RUN=1` means nothing is really booked until you turn it off in step 12.
    ```powershell
    fly secrets set APP_PASSWORD="MyLongPassword123" SECRET_KEY="$SECRET" NTFY_TOPIC="$TOPIC" PUBLIC_URL=https://rezzie-jf.fly.dev DRY_RUN=1
    ```
@@ -144,12 +144,23 @@ All commands below go in **Windows PowerShell**: press the Windows key, type `Po
     fly secrets unset DRY_RUN
     ```
 
-**Updating later:** from PowerShell in the `rezzie` folder:
-```powershell
-git pull; fly deploy --ha=false --remote-only
-```
+13. **Turn on automatic updates (one time).**
+    1. In PowerShell, in the `rezzie` folder, run the command below and copy the long token it prints (it starts with `FlyV1`).
+       ```powershell
+       fly tokens create deploy
+       ```
+    2. On GitHub, open the rezzie repo, then **Settings → Secrets and variables → Actions → New repository secret**.
+    3. Name: `FLY_API_TOKEN`. Secret: paste the token. Click **Add secret**.
 
-**Optional auto-deploy:** once this branch is merged into `main`, run `fly tokens create deploy` and save the token as a GitHub repo secret named `FLY_API_TOKEN` (repo → Settings → Secrets and variables → Actions). Every push to `main` then tests and deploys automatically.
+### How automatic updates work
+
+You never run update commands. Whenever a change is pushed to this repo (on `main` or a `claude/…` branch), GitHub Actions:
+
+1. runs the test suite, and stops if anything fails, so the running app is left untouched;
+2. waits until no snipe is running or due in the next 15 minutes, so a restart never interrupts a drop;
+3. deploys the new version to Fly as a single machine.
+
+Restarts take under a minute. Your data, logins and secrets live on Fly and are kept. You can watch each update under the repo's **Actions** tab, and you can re-run the latest deploy by hand there (**Deploy to Fly.io → Run workflow**).
 
 ## Using it
 

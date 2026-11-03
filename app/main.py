@@ -443,6 +443,29 @@ async def healthz():
     return {"ok": True}
 
 
+DEPLOY_GUARD_SECONDS = 15 * 60
+
+
+@app.get("/api/busy")
+async def busy():
+    """Unauthenticated deploy guard: is a snipe running or due soon?
+
+    The auto-deploy workflow waits while this says busy so a restart never
+    lands in the middle of a snipe. Deliberately reveals nothing else.
+    """
+    now = datetime.now(timezone.utc)
+    for r in db.list_requests(["scheduled", "attempting"]):
+        if r["status"] == "attempting":
+            return {"busy": True}
+        rel = r.get("release_at")
+        if rel:
+            delta = (datetime.fromisoformat(rel) - now).total_seconds()
+            window = r.get("snipe_window_seconds") or settings.snipe_window_seconds
+            if -window - 30 <= delta <= DEPLOY_GUARD_SECONDS:
+                return {"busy": True}
+    return {"busy": False}
+
+
 @app.get("/sw.js")
 async def sw():
     return FileResponse(os.path.join(WEB_DIR, "sw.js"), media_type="application/javascript",

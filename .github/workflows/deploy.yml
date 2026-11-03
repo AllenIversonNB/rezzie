@@ -1,10 +1,11 @@
 name: Deploy to Fly.io
-# Runs on every push to main (after tests) and on demand from the Actions tab.
-# Needs a repo secret FLY_API_TOKEN (fly tokens create deploy). Without it, this
-# workflow is skipped.
+# Automatic updates: every push to main or to a claude/* working branch runs the
+# tests and, if they pass, deploys to Fly. Also runnable by hand from the
+# Actions tab. Needs the repo secret FLY_API_TOKEN (fly tokens create deploy);
+# until it exists this workflow does nothing.
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   workflow_dispatch:
 concurrency:
   group: deploy
@@ -12,10 +13,15 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
+      - name: Check deploy token
+        if: env.FLY_API_TOKEN == ''
+        run: echo "::notice::FLY_API_TOKEN secret not set yet - skipping deploy."
       - uses: actions/checkout@v4
+        if: env.FLY_API_TOKEN != ''
       - uses: actions/setup-python@v5
         if: env.FLY_API_TOKEN != ''
         with:
@@ -23,6 +29,17 @@ jobs:
       - name: Test
         if: env.FLY_API_TOKEN != ''
         run: pip install -r requirements-dev.txt && python -m pytest -q
+      - name: Wait until no snipe is running or due in the next 15 minutes
+        if: env.FLY_API_TOKEN != ''
+        run: |
+          APP=$(grep -E '^app *=' fly.toml | sed -E 's/.*"(.*)".*/\1/')
+          for i in $(seq 1 75); do
+            BUSY=$(curl -fsS -m 10 "https://$APP.fly.dev/api/busy" || echo '{"busy": false}')
+            echo "$(date -u +%T) $BUSY"
+            echo "$BUSY" | grep -q '"busy":true' || exit 0
+            sleep 60
+          done
+          echo "::warning::Still busy after 75 minutes - deploying anyway."
       - uses: superfly/flyctl-actions/setup-flyctl@master
         if: env.FLY_API_TOKEN != ''
       - name: Deploy (single machine)

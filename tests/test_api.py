@@ -85,3 +85,18 @@ def test_status_endpoint():
         s = c.get("/api/status").json()
         assert s["platforms"]["resy"]["budget"] > 0
         assert s["platforms"]["resy"]["auth"]["has_credentials"] is True
+
+
+def test_busy_guard():
+    from datetime import datetime, timedelta, timezone
+    from app import db
+    with client() as c:
+        assert c.get("/api/busy").json() == {"busy": False}
+        _login(c)
+        rid = c.post("/api/requests", json=BODY).json()["id"]
+        assert c.get("/api/busy").json() == {"busy": False}  # release is far away
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(timespec="seconds")
+        db.update_request(rid, release_at=soon)
+        assert c.get("/api/busy").json() == {"busy": True}
+        db.update_request(rid, status="attempting")
+        assert c.get("/api/busy").json() == {"busy": True}
