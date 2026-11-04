@@ -11,7 +11,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import db
@@ -36,9 +36,47 @@ class _State:
     strikes: int = 0
 
 
-# Monitors may only consume this fraction of the daily budget; the rest is
-# reserved for snipes that fire at a known time.
-MONITOR_BUDGET_SHARE = 0.75
+# Calls held back each day for snipes (a snipe uses ~20-40). Monitors get the rest.
+SNIPE_RESERVE = 100
+BUDGET_MIN, BUDGET_MAX = 200, 3000
+
+
+def daily_budget(platform: str) -> int:
+    """Per-platform daily call ceiling: Settings override, else DAILY_CALL_BUDGET."""
+    v = db.kv_get(f"budget:{platform}")
+    try:
+        return int(v) if v else settings.daily_call_budget
+    except (TypeError, ValueError):
+        return settings.daily_call_budget
+
+
+def monitor_budget(platform: str) -> int:
+    b = daily_budget(platform)
+    return max(b // 2, b - SNIPE_RESERVE)
+
+
+def _local_now() -> datetime:
+    return datetime.now(ZoneInfo(settings.app_timezone))
+
+
+def awake_seconds_left_today(now: datetime | None = None) -> float:
+    """Seconds until local midnight, counting quiet hours at 1/4 weight (monitors run 4x slower then)."""
+    now = now or _local_now()
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    total = 0.0
+    t = now
+    while t < midnight:
+        nxt = min(midnight, (t + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0))
+        span = (nxt - t).total_seconds()
+        total += span * (0.25 if in_quiet_hours(t) else 1.0)
+        t = nxt
+    return max(60.0, total)
+
+
+def seconds_until_local_midnight() -> float:
+    now = _local_now()
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (midnight - now).total_seconds()
 
 
 class Governor:
@@ -79,7 +117,7 @@ class Governor:
             raise PlatformPaused(pu, self.pause_reason(platform))
 
         used = db.usage_get(platform)
-        cap = settings.daily_call_budget if urgent else int(settings.daily_call_budget * MONITOR_BUDGET_SHARE)
+        cap = daily_budget(platform) if urgent else monitor_budget(platform)
         if used >= cap:
             raise BudgetExhausted(f"{platform}: daily call budget reached ({used}/{cap})")
 
@@ -105,6 +143,17 @@ class Governor:
         """Keep background monitors off a platform (e.g. around a snipe burst)."""
         st = self._st(platform)
         st.hold_until = max(st.hold_until, time.monotonic() + seconds)
+
+    def pacing_interval(self, platform: str, calls_per_round: float) -> float:
+        """Smallest awake-hours interval at which all monitors on this platform can
+        keep checking until midnight without running out of budget.
+
+        calls_per_round: total calls one check of every active monitor costs.
+        """
+        remaining = monitor_budget(platform) - db.usage_get(platform)
+        if remaining <= 0:
+            return float("inf")
+        return awake_seconds_left_today() * max(1.0, calls_per_round) / remaining
 
     # -------------------------------------------------------------- report
     def ok(self, platform: str) -> None:

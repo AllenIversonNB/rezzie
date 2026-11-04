@@ -25,7 +25,16 @@ from .platforms import opentable
 from .platforms.base import PlatformError
 from .platforms.resy import ResyClient
 from .platforms.sevenrooms import guest_details, save_guest_details
-from .safety import BudgetExhausted, PlatformPaused, governor
+from .safety import (
+    BUDGET_MAX,
+    BUDGET_MIN,
+    SNIPE_RESERVE,
+    BudgetExhausted,
+    PlatformPaused,
+    daily_budget,
+    governor,
+    monitor_budget,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("rezzie")
@@ -116,20 +125,29 @@ async def logout(response: Response):
 @app.get("/api/status", dependencies=[Depends(require_auth)])
 async def status():
     platforms = {}
+    active = db.list_requests(["monitoring"])
     for p in ("resy", "sevenrooms"):
         pu = governor.paused_until(p)
+        cost = engine.platform_round_cost(p)
+        pace = governor.pacing_interval(p, cost) if cost else None
         platforms[p] = {
             "calls_today": db.usage_get(p),
-            "budget": settings.daily_call_budget,
+            "budget": daily_budget(p),
+            "monitor_budget": monitor_budget(p),
+            "active_monitors": sum(1 for r in active if r["platform"] == p),
+            # Typical daytime gap between checks of each monitor right now.
+            "pace_seconds": (None if pace is None else
+                             (None if pace == float("inf") else round(max(settings.min_poll_seconds, pace)))),
+            "budget_exhausted": pace == float("inf"),
             "paused_until": pu if pu > time.time() else None,
             "pause_reason": governor.pause_reason(p) if pu > time.time() else None,
         }
     platforms["resy"]["auth"] = ResyClient().auth_status()
+    platforms["resy"]["snipe_reserve"] = SNIPE_RESERVE
     g = guest_details()
     platforms["sevenrooms"]["guest"] = (
         {"name": f"{g['first_name']} {g['last_name']}", "email": g["email"],
          "phone": f"+{g['dial_code']} {g['phone']}"} if g else None)
-    active = db.list_requests(["monitoring"])
     return {
         "server_time": datetime.now(timezone.utc).isoformat(),
         "app_timezone": settings.app_timezone,
@@ -140,6 +158,8 @@ async def status():
         "resy_from_env": bool(settings.resy_email and settings.resy_password),
         "proxy": bool(settings.outbound_proxy),
         "active_monitors": len(active),
+        "budget_min": BUDGET_MIN,
+        "budget_max": BUDGET_MAX,
         "max_active_monitors": settings.max_active_monitors,
         "min_poll_seconds": settings.min_poll_seconds,
         "platforms": platforms,
@@ -188,6 +208,24 @@ async def test_resy():
         return {"ok": True, "user": await ResyClient().load_user()}
     except Exception as e:
         raise _err(e)
+
+
+class BudgetIn(BaseModel):
+    daily_budget: int
+
+
+@app.post("/api/settings/budget/{platform}", dependencies=[Depends(require_auth)])
+async def save_budget(platform: Literal["resy", "sevenrooms"], body: BudgetIn):
+    if not BUDGET_MIN <= body.daily_budget <= BUDGET_MAX:
+        raise HTTPException(400, f"Daily budget must be between {BUDGET_MIN} and {BUDGET_MAX}")
+    db.kv_set(f"budget:{platform}", body.daily_budget)
+    db.log_event(None, f"{platform}: daily call budget set to {body.daily_budget}")
+    # Let monitors re-pace right away instead of waiting out old long intervals.
+    soon = datetime.now(timezone.utc) + timedelta(seconds=random.uniform(10, 60))
+    for r in db.list_requests(["monitoring"]):
+        if r["platform"] == platform:
+            db.update_request(r["id"], next_check_at=soon.isoformat(timespec="seconds"))
+    return {"ok": True, "daily_budget": body.daily_budget}
 
 
 class GuestIn(BaseModel):

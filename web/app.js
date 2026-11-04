@@ -599,6 +599,20 @@ async function renderSettings() {
     sc.append(el("div", { class: "row between", style: "padding:6px 0" },
       el("span", {}, PLATFORM_NAMES[p]),
       el("span", { class: "muted small mono" }, `${s.calls_today}/${s.budget} calls today`)));
+    const mins = sec => sec < 90 ? `${Math.round(sec)} sec` : `${Math.round(sec / 60)} min`;
+    sc.append(el("div", { class: "muted small" },
+      s.budget_exhausted ? `Monitor budget used up for today (${s.monitor_budget}). Monitors resume after midnight.`
+        : s.active_monitors ? `${s.active_monitors} monitor${s.active_monitors > 1 ? "s" : ""} running · each checks about every ${mins(Math.max(s.pace_seconds || 0, 120))} in the daytime (budget spread until midnight, slower overnight)`
+        : `No monitors running. ${s.monitor_budget} calls/day available to monitors; ${s.budget - s.monitor_budget} held back for snipes.`));
+    const bIn = el("input", { type: "number", inputmode: "numeric", min: st.budget_min, max: st.budget_max, step: 100, value: s.budget, style: "max-width:120px" });
+    const bBtn = el("button", { class: "btn ghost" }, "Set daily budget");
+    bBtn.onclick = () => busy(bBtn, async () => {
+      const v = parseInt(bIn.value, 10);
+      if (v > 1500 && !confirm(`${v} calls/day is above the 1,500 I'd suggest. Higher means more chance ${PLATFORM_NAMES[p]} notices. Continue?`)) return;
+      await api(`/api/settings/budget/${p}`, { method: "POST", body: { daily_budget: v } });
+      toast("Budget updated"); route();
+    });
+    sc.append(el("div", { class: "row", style: "flex-wrap:nowrap;margin:8px 0 12px" }, bIn, bBtn));
     if (s.paused_until) {
       const rb = el("button", { class: "btn danger block" }, `Resume ${PLATFORM_NAMES[p]} now (not recommended)`);
       rb.onclick = () => confirm("Cooling off protects your account. Resume anyway?") && busy(rb, async () => { await api(`/api/platform/${p}/resume`, { method: "POST" }); route(); });

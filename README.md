@@ -59,7 +59,8 @@ These are the main ways an account gets flagged, and what Rezzie does about each
 
 1. **Too many requests.**
    - At least 6–10 s (randomized) between any two background calls to a platform.
-   - A hard **daily call budget** per platform (900 by default). Monitors can use only 75% of it, so a scheduled snipe always has headroom.
+   - A hard **daily call budget** per platform (900 by default; change it in **Settings → Account safety**). 100 calls a day are held back so snipes always have headroom; monitors share the rest.
+   - **Budget pacing:** monitors space their checks so the day's budget lasts until midnight (New York time), so they never go dark in the evening. More monitors means each one checks less often. Roughly, at the default budget: 1 monitor checks every 2 min, 3 every ~4–5 min, 8 every ~12 min. Monitors watching several dates cost about double.
    - Monitors poll every **2 min by default** (60 s minimum), with ±25% jitter.
    - Overnight (1–7 am) polling slows 4×. It speeds up in the last 48 hours, when cancellations actually happen.
    - At most 8 active monitors at once.

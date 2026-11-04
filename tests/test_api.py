@@ -100,3 +100,14 @@ def test_busy_guard():
         assert c.get("/api/busy").json() == {"busy": True}
         db.update_request(rid, status="attempting")
         assert c.get("/api/busy").json() == {"busy": True}
+
+
+def test_budget_setting_and_status_pace():
+    with client() as c:
+        _login(c)
+        assert c.post("/api/settings/budget/resy", json={"daily_budget": 50}).status_code == 400
+        assert c.post("/api/settings/budget/resy", json={"daily_budget": 1500}).status_code == 200
+        c.post("/api/requests", json={**BODY, "mode": "monitor", "release_local": None})
+        r = c.get("/api/status").json()["platforms"]["resy"]
+        assert r["budget"] == 1500 and r["monitor_budget"] == 1400 and r["active_monitors"] == 1
+        assert r["pace_seconds"] >= 60 and r["budget_exhausted"] is False

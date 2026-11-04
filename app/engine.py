@@ -33,7 +33,15 @@ from .platforms.base import (
 )
 from .platforms.resy import ResyClient
 from .platforms.sevenrooms import SevenRoomsClient, guest_details
-from .safety import BudgetExhausted, PlatformPaused, effective_poll_interval, governor
+from .safety import (
+    BudgetExhausted,
+    PlatformPaused,
+    effective_poll_interval,
+    governor,
+    in_quiet_hours,
+    jitter,
+    seconds_until_local_midnight,
+)
 
 log = logging.getLogger("rezzie.engine")
 
@@ -347,10 +355,7 @@ class Engine:
             return
         today = venue_today(req).isoformat()
         dates = [d for d in req["dates"] if d >= today]
-        interval = effective_poll_interval(req.get("poll_interval_seconds"))
-        # Cancellations cluster in the last ~48h: look a bit more often then.
-        if dates and (Date.fromisoformat(dates[0]) - Date.fromisoformat(today)).days <= 2:
-            interval = max(settings.min_poll_seconds, interval * 0.6)
+        interval = self.monitor_interval(req, dates, today)
         try:
             find = self._client_find(req)
             to_check = dates
@@ -381,8 +386,8 @@ class Engine:
             db.update_request(rid, next_check_at=nxt.isoformat(timespec="seconds"), last_error=f"Paused: {e.reason}")
             return
         except BudgetExhausted as e:
-            tomorrow = (utcnow() + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
-            db.update_request(rid, next_check_at=tomorrow.isoformat(timespec="seconds"), last_error=str(e))
+            nxt = utcnow() + timedelta(seconds=seconds_until_local_midnight() + random.uniform(60, 600))
+            db.update_request(rid, next_check_at=nxt.isoformat(timespec="seconds"), last_error=str(e))
             return
         except (RateLimited, Blocked) as e:
             await self._platform_trouble(req, e)
@@ -401,6 +406,40 @@ class Engine:
             db.log_event(rid, f"check failed: {e}", "warn")
         nxt = utcnow() + timedelta(seconds=interval)
         db.update_request(rid, next_check_at=nxt.isoformat(timespec="seconds"))
+
+    # ------------------------------------------------------------ pacing
+    @staticmethod
+    def calls_per_check(req: dict[str, Any]) -> float:
+        n = len(req.get("dates") or []) or 1
+        if req["platform"] == "resy":
+            return 1.0 if n == 1 else 2.0  # calendar + usually one find
+        return float(min(n, 3))
+
+    def platform_round_cost(self, platform: str) -> float:
+        """Calls one check of every active monitor on a platform costs."""
+        return sum(self.calls_per_check(r) for r in db.list_requests(["monitoring"]) if r["platform"] == platform)
+
+    def monitor_interval(self, req: dict[str, Any], dates: list[str], today: str) -> float:
+        """Seconds until this monitor's next check.
+
+        The larger of (a) the interval you chose, nudged by how far away the
+        date is, and (b) the pace at which today's remaining budget, shared by
+        every active monitor on the platform, lasts until midnight. Then 4x
+        slower overnight, plus jitter.
+        """
+        base = float(max(settings.min_poll_seconds, int(req.get("poll_interval_seconds") or 0) or 120))
+        if dates:
+            days_out = (Date.fromisoformat(dates[0]) - Date.fromisoformat(today)).days
+            if days_out <= 2:      # cancellations cluster in the last ~48h
+                base *= 0.6
+            elif days_out > 7:     # far-off dates rarely move; save budget for near ones
+                base *= 1.5
+        paced = governor.pacing_interval(req["platform"], max(self.calls_per_check(req),
+                                                              self.platform_round_cost(req["platform"])))
+        interval = max(settings.min_poll_seconds, base, min(paced, seconds_until_local_midnight() + 300))
+        if in_quiet_hours():
+            interval *= 4
+        return jitter(interval)
 
     # ------------------------------------------------------------ manual
     async def check_now(self, rid: str) -> list[dict[str, Any]]:

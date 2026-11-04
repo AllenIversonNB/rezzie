@@ -172,3 +172,23 @@ async def test_sevenrooms_card_only_slots_notify():
     await Engine(resy=FakeResy([[]]), sevenrooms=sr).check_monitor(r["id"])
     out = db.get_request(r["id"])
     assert out["status"] == "found" and "card" in out["last_error"] and sr.booked == []
+
+
+def test_monitor_interval_respects_budget_pace():
+    settings.min_poll_seconds = 60
+    settings.quiet_hours = ""
+    eng = Engine(resy=FakeResy([[]]))
+    reqs = [base_req(mode="monitor", status="monitoring", release_at=None, poll_interval_seconds=120,
+                     dates=["2099-01-01"]) for _ in range(4)]
+    today = "2098-12-20"  # 12 days out -> base 120 * 1.5 = 180s
+    fresh = eng.monitor_interval(reqs[0], reqs[0]["dates"], today)
+    assert 120 <= fresh <= 300
+    db.usage_incr("resy", n=780)  # 20 calls left for 4 monitors -> must slow way down
+    slow = eng.monitor_interval(reqs[0], reqs[0]["dates"], today)
+    assert slow > fresh * 5
+
+
+def test_usage_day_is_local():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    assert db.today_key() == datetime.now(ZoneInfo(settings.app_timezone)).strftime("%Y-%m-%d")

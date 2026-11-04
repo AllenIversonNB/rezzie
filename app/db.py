@@ -218,7 +218,10 @@ def kv_delete(key: str) -> None:
 # ------------------------------------------------------------------- usage
 
 def today_key(tz_name: str | None = None) -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime())
+    """Usage counters reset at local midnight (APP_TIMEZONE)."""
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(tz_name or settings.app_timezone)).strftime("%Y-%m-%d")
 
 
 def usage_incr(platform: str, kind: str = "call", n: int = 1) -> int:
