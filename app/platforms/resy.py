@@ -378,7 +378,9 @@ class ResyClient:
                     token=str(cfg.get("token") or ""),
                     bookable=bool(cfg.get("token")),
                     link=link,
-                    raw={"config_id": cfg.get("id")},
+                    raw={"config_id": cfg.get("id"),
+                         # Seconds before the slot when a cancellation fee starts, if Resy says.
+                         "cancel_cutoff_secs": (s.get("payment") or {}).get("secs_cancel_cut_off")},
                 ))
         return slots
 

@@ -59,24 +59,11 @@ def _local_now() -> datetime:
     return datetime.now(ZoneInfo(settings.app_timezone))
 
 
-def awake_seconds_left_today(now: datetime | None = None) -> float:
-    """Seconds until local midnight, counting quiet hours at 1/4 weight (monitors run 4x slower then)."""
-    now = now or _local_now()
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    total = 0.0
-    t = now
-    while t < midnight:
-        nxt = min(midnight, (t + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0))
-        span = (nxt - t).total_seconds()
-        total += span * (0.25 if in_quiet_hours(t) else 1.0)
-        t = nxt
-    return max(60.0, total)
-
-
-def seconds_until_local_midnight() -> float:
-    now = _local_now()
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return (midnight - now).total_seconds()
+def seconds_until_local_midnight(now: datetime | None = None) -> float:
+    tz = ZoneInfo(settings.app_timezone)
+    local = (now or datetime.now(tz)).astimezone(tz)
+    midnight = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (midnight - local).total_seconds()
 
 
 class Governor:
@@ -143,17 +130,6 @@ class Governor:
         """Keep background monitors off a platform (e.g. around a snipe burst)."""
         st = self._st(platform)
         st.hold_until = max(st.hold_until, time.monotonic() + seconds)
-
-    def pacing_interval(self, platform: str, calls_per_round: float) -> float:
-        """Smallest awake-hours interval at which all monitors on this platform can
-        keep checking until midnight without running out of budget.
-
-        calls_per_round: total calls one check of every active monitor costs.
-        """
-        remaining = monitor_budget(platform) - db.usage_get(platform)
-        if remaining <= 0:
-            return float("inf")
-        return awake_seconds_left_today() * max(1.0, calls_per_round) / remaining
 
     # -------------------------------------------------------------- report
     def ok(self, platform: str) -> None:

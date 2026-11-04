@@ -237,6 +237,8 @@ async function renderDetail(id) {
   if (r.release_at) rows.push(["Opens", fmtWhen(r.release_at, r.venue_tz)]);
   if (r.mode !== "reminder") rows.push(["Checks", `${r.attempt_count} · last ${ago(r.last_checked)}`]);
   if (r.status === "monitoring" && r.next_check_at) rows.push(["Next check", fmtWhen(r.next_check_at)]);
+  if (r.status === "monitoring" && r.hotness_label) rows.push(["Check speed", r.hotness_label]);
+  if (r.status === "monitoring" && r.cutoff_hours) rows.push(["Cancel deadline", `${r.cutoff_hours}h before (from ${PLATFORM_NAMES[r.platform]})`]);
   if (r.monitor_until) rows.push(["Watch until", fmtWhen(r.monitor_until, r.venue_tz)]);
   if (r.notes) rows.push(["Notes", r.notes]);
 
@@ -602,7 +604,7 @@ async function renderSettings() {
     const mins = sec => sec < 90 ? `${Math.round(sec)} sec` : `${Math.round(sec / 60)} min`;
     sc.append(el("div", { class: "muted small" },
       s.budget_exhausted ? `Monitor budget used up for today (${s.monitor_budget}). Monitors resume after midnight.`
-        : s.active_monitors ? `${s.active_monitors} monitor${s.active_monitors > 1 ? "s" : ""} running · each checks about every ${mins(Math.max(s.pace_seconds || 0, 120))} in the daytime (budget spread until midnight, slower overnight)`
+        : s.active_monitors && s.intervals ? `${s.active_monitors} monitor${s.active_monitors > 1 ? "s" : ""} running. Each checks about every ${mins(s.intervals.hot)} in hot windows, ${mins(s.intervals.normal)} normally, ${mins(s.intervals.overnight)} overnight. Budget is spread until midnight.`
         : `No monitors running. ${s.monitor_budget} calls/day available to monitors; ${s.budget - s.monitor_budget} held back for snipes.`));
     const bIn = el("input", { type: "number", inputmode: "numeric", min: st.budget_min, max: st.budget_max, step: 100, value: s.budget, style: "max-width:120px" });
     const bBtn = el("button", { class: "btn ghost" }, "Set daily budget");
@@ -624,6 +626,10 @@ async function renderSettings() {
     `outbound proxy: ${st.proxy ? "on" : "off"}${st.dry_run ? " · DRY RUN" : ""}`));
   out.push(sc);
 
+  // When have tables opened up? (learned from every new slot monitors have seen)
+  out.push(el("div", { class: "section-title" }, "When tables opened up"));
+  out.push(await insightsCard());
+
   // Activity log
   out.push(el("div", { class: "section-title" }, "Recent activity"));
   const ev = await api("/api/events?limit=60");
@@ -633,6 +639,42 @@ async function renderSettings() {
   lo.onclick = () => busy(lo, async () => { await api("/api/logout", { method: "POST" }); state.authed = false; route(); });
   out.push(lo);
   $view.replaceChildren(...out);
+}
+
+// ---------------------------------------------------------------- insights
+function barChart(title, items, note) {
+  // items: [{label, count, tick}] — tick: axis label to show (or "")
+  const max = Math.max(1, ...items.map(i => i.count));
+  const peak = items.reduce((a, b) => (b.count > a.count ? b : a), items[0]);
+  const readout = el("div", { class: "chart-readout" }, peak.count ? `Peak: ${peak.label} · ${peak.count}` : "No data yet");
+  const show = i => { readout.textContent = `${i.label} · ${i.count} opening${i.count === 1 ? "" : "s"}`; };
+  const bars = el("div", { class: "chart-bars", role: "img",
+    "aria-label": `${title}: ` + items.map(i => `${i.label} ${i.count}`).join(", ") },
+    items.map(i => el("button", { type: "button", class: "chart-col", "aria-label": `${i.label}: ${i.count}`,
+      onpointerenter: () => show(i), onclick: () => show(i), onfocus: () => show(i) },
+      el("span", { class: "chart-bar", style: `height:${i.count ? Math.max(4, (i.count / max) * 100) : 0}%` }))));
+  const ticks = el("div", { class: "chart-ticks" }, items.map(i => el("span", {}, i.tick)));
+  const table = el("details", { class: "chart-table" }, el("summary", {}, "Show as table"),
+    el("table", {}, el("tbody", {}, items.map(i => el("tr", {}, el("td", {}, i.label), el("td", { class: "mono" }, String(i.count)))))));
+  return el("div", { class: "chart" }, el("div", { class: "chart-title" }, title), note ? el("div", { class: "muted small" }, note) : null,
+    readout, bars, ticks, table);
+}
+
+async function insightsCard() {
+  const st = await api("/api/insights").catch(() => null);
+  const card = el("div", { class: "card" });
+  if (!st || !st.total) {
+    card.append(el("div", { class: "muted" }, "Nothing logged yet. Every time a monitor sees a table that wasn't there on its last check, Rezzie records when it appeared. After a week or two of monitoring, this shows when cancellations actually happen for the restaurants you watch."));
+    return card;
+  }
+  const hourLabel = h => `${((h + 11) % 12) + 1}${h < 12 ? "am" : "pm"}`;
+  const byHour = st.by_hour.map((c, h) => ({ label: hourLabel(h), count: c, tick: h % 6 === 0 ? hourLabel(h) : "" }));
+  const byBefore = st.by_hours_before.map(b => ({ label: `${b.label} before`, count: b.count, tick: b.label }));
+  card.append(
+    el("div", { class: "muted small" }, `${st.total} opening${st.total === 1 ? "" : "s"} seen so far. Tap a bar for its count.`),
+    barChart("By time of day", byHour, "Local time when the table appeared"),
+    barChart("By how long before the reservation", byBefore));
+  return card;
 }
 
 // ------------------------------------------------------------------ boot

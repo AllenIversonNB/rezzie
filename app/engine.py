@@ -33,13 +33,14 @@ from .platforms.base import (
 )
 from .platforms.resy import ResyClient
 from .platforms.sevenrooms import SevenRoomsClient, guest_details
+from . import hotness as hotness_mod
 from .safety import (
     BudgetExhausted,
     PlatformPaused,
     effective_poll_interval,
     governor,
-    in_quiet_hours,
     jitter,
+    monitor_budget,
     seconds_until_local_midnight,
 )
 
@@ -355,7 +356,7 @@ class Engine:
             return
         today = venue_today(req).isoformat()
         dates = [d for d in req["dates"] if d >= today]
-        interval = self.monitor_interval(req, dates, today)
+        interval = self.monitor_interval(req)
         try:
             find = self._client_find(req)
             to_check = dates
@@ -372,8 +373,14 @@ class Engine:
                 k = (req.get("attempt_count") or 0) % len(dates)
                 to_check = (dates[k:] + dates[:k])[:3]
             all_slots: list[Slot] = []
+            checked: dict[str, list[Slot]] = {}
             for d in to_check:
-                all_slots += await find(d)
+                checked[d] = await find(d)
+                all_slots += checked[d]
+            try:
+                self._learn(req, checked)
+            except Exception as e:  # learning must never break monitoring
+                log.warning("learn failed: %s", e)
             db.update_request(rid, attempt_count=(req.get("attempt_count") or 0) + 1,
                               last_checked=db.now_iso(), last_error=None)
             matches = matching_slots(req, all_slots)
@@ -415,31 +422,62 @@ class Engine:
             return 1.0 if n == 1 else 2.0  # calendar + usually one find
         return float(min(n, 3))
 
-    def platform_round_cost(self, platform: str) -> float:
-        """Calls one check of every active monitor on a platform costs."""
-        return sum(self.calls_per_check(r) for r in db.list_requests(["monitoring"]) if r["platform"] == platform)
+    def plan(self, platform: str, now: datetime | None = None) -> dict[str, float]:
+        """Budget plan for the rest of today on one platform.
 
-    def monitor_interval(self, req: dict[str, Any], dates: list[str], today: str) -> float:
-        """Seconds until this monitor's next check.
-
-        The larger of (a) the interval you chose, nudged by how far away the
-        date is, and (b) the pace at which today's remaining budget, shared by
-        every active monitor on the platform, lasts until midnight. Then 4x
-        slower overnight, plus jitter.
+        Every monitor checks at a rate proportional to its hotness. The
+        "pace" P is seconds per unit of hotness, chosen so that all monitors'
+        weighted checks fit the remaining monitor budget until local midnight:
+            sum_m cost_m * ∫ hotness_m dt / P  <=  remaining calls
+        A monitor's interval at time t is then P / hotness_m(t).
         """
+        now = now or utcnow()
+        remaining = monitor_budget(platform) - db.usage_get(platform)
+        if remaining <= 0:
+            return {"pace": float("inf"), "remaining": 0}
+        end = now + timedelta(seconds=seconds_until_local_midnight(now))
+        load = sum(self.calls_per_check(r) * hotness_mod.weight_until(r, now, end)
+                   for r in db.list_requests(["monitoring"]) if r["platform"] == platform)
+        return {"pace": load / remaining if load else 0.0, "remaining": remaining}
+
+    def monitor_interval(self, req: dict[str, Any], dates: list[str] | None = None, today: str | None = None,
+                         now: datetime | None = None) -> float:
+        """Seconds until this monitor's next check: the slower of your chosen
+        interval and the budget pace, both divided by the current hotness."""
+        now = now or utcnow()
+        w = max(0.05, hotness_mod.hotness(req, now))
         base = float(max(settings.min_poll_seconds, int(req.get("poll_interval_seconds") or 0) or 120))
-        if dates:
-            days_out = (Date.fromisoformat(dates[0]) - Date.fromisoformat(today)).days
-            if days_out <= 2:      # cancellations cluster in the last ~48h
-                base *= 0.6
-            elif days_out > 7:     # far-off dates rarely move; save budget for near ones
-                base *= 1.5
-        paced = governor.pacing_interval(req["platform"], max(self.calls_per_check(req),
-                                                              self.platform_round_cost(req["platform"])))
-        interval = max(settings.min_poll_seconds, base, min(paced, seconds_until_local_midnight() + 300))
-        if in_quiet_hours():
-            interval *= 4
-        return jitter(interval)
+        pace = self.plan(req["platform"], now)["pace"]
+        interval = max(settings.min_poll_seconds, base / w, pace / w)
+        # The budget refills at midnight, so never sleep much past it.
+        interval = min(interval, seconds_until_local_midnight(now) + random.uniform(60, 600))
+        return jitter(interval, 0.2)
+
+    def _learn(self, req: dict[str, Any], checked: dict[str, list[Slot]]) -> None:
+        """Log tables that weren't there on the previous check (= openings),
+        and remember the restaurant's cancellation cutoff if Resy reported it."""
+        key = f"seen:{req['id']}"
+        prev = db.kv_get(key, {}) or {}
+        tz = hotness_mod._tz(req.get("venue_tz"))
+        now_local = datetime.now(tz)
+        for day, slots in checked.items():
+            times = sorted({s.time for s in slots})
+            if day in prev:
+                for t in set(times) - set(prev[day]):
+                    y, mo, d = (int(x) for x in day.split("-"))
+                    hh, mm = (int(x) for x in t.split(":"))
+                    slot_dt = datetime(y, mo, d, hh, mm, tzinfo=tz)
+                    hours_before = (slot_dt - now_local).total_seconds() / 3600
+                    if hours_before > 0:
+                        db.record_opening(req["platform"], req["venue_id"], req["venue_name"], day, t,
+                                          now_local.hour, hours_before)
+            prev[day] = times
+            for s in slots:
+                if s.raw.get("cancel_cutoff_secs"):
+                    hotness_mod.remember_cutoff(req, s.raw["cancel_cutoff_secs"])
+                    break
+        today = now_local.date().isoformat()
+        db.kv_set(key, {d: v for d, v in prev.items() if d >= today})
 
     # ------------------------------------------------------------ manual
     async def check_now(self, rid: str) -> list[dict[str, Any]]:

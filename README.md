@@ -60,7 +60,9 @@ These are the main ways an account gets flagged, and what Rezzie does about each
 1. **Too many requests.**
    - At least 6–10 s (randomized) between any two background calls to a platform.
    - A hard **daily call budget** per platform (900 by default; change it in **Settings → Account safety**). 100 calls a day are held back so snipes always have headroom; monitors share the rest.
-   - **Budget pacing:** monitors space their checks so the day's budget lasts until midnight (New York time), so they never go dark in the evening. More monitors means each one checks less often. Roughly, at the default budget: 1 monitor checks every 2 min, 3 every ~4–5 min, 8 every ~12 min. Monitors watching several dates cost about double.
+   - **Budget pacing:** monitors space their checks so the day's budget lasts until midnight (New York time), so they never go dark in the evening. More monitors means each one checks less often. Monitors watching several dates cost about double.
+   - **Hot windows:** the budget is spent where cancellations actually happen. Each monitor checks fastest in the ~2.5 h before the restaurant's cancellation-fee deadline (Resy's reported cutoff when known, else 24 h, plus a smaller 48 h bump), on the day itself 9 am–noon and 3–6 pm, and somewhat faster within 48 h. Dates more than a week away and overnight hours get far fewer checks (see `app/hotness.py`).
+   - **Learning:** every table that appears between two checks is logged, and **Settings → When tables opened up** charts them by time of day and by how long before the reservation, so the windows can be tuned from real data.
    - Monitors poll every **2 min by default** (60 s minimum), with ±25% jitter.
    - Overnight (1–7 am) polling slows 4×. It speeds up in the last 48 hours, when cancellations actually happen.
    - At most 8 active monitors at once.
@@ -222,6 +224,7 @@ Then open http://localhost:8000.
 app/
   main.py            FastAPI routes + serves /web
   engine.py          snipe / monitor / reminder scheduler (asyncio, in-process)
+  hotness.py         when cancellations are likely; drives monitor pacing
   safety.py          Governor: pacing, daily budgets, backoff, pauses
   matching.py        slot filtering and ranking
   notify.py          ntfy push

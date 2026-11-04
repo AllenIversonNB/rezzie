@@ -110,4 +110,20 @@ def test_budget_setting_and_status_pace():
         c.post("/api/requests", json={**BODY, "mode": "monitor", "release_local": None})
         r = c.get("/api/status").json()["platforms"]["resy"]
         assert r["budget"] == 1500 and r["monitor_budget"] == 1400 and r["active_monitors"] == 1
-        assert r["pace_seconds"] >= 60 and r["budget_exhausted"] is False
+        assert r["intervals"]["normal"] >= 60 and r["budget_exhausted"] is False
+
+
+def test_insights_and_hotness_in_detail():
+    from app import db
+    with client() as c:
+        _login(c)
+        assert c.get("/api/insights").json()["total"] == 0
+        db.record_opening("resy", "1", "X", "2099-01-01", "19:00", 10, 30.0)
+        st = c.get("/api/insights").json()
+        assert st["total"] == 1 and st["by_hour"][10] == 1
+        assert [b["count"] for b in st["by_hours_before"] if b["label"] == "1–2d"] == [1]
+        rid = c.post("/api/requests", json={**BODY, "mode": "monitor", "release_local": None}).json()["id"]
+        d = c.get(f"/api/requests/{rid}").json()
+        assert d["hotness"] > 0 and d["hotness_label"]
+        s = c.get("/api/status").json()["platforms"]["resy"]["intervals"]
+        assert s["hot"] <= s["normal"] <= s["overnight"]

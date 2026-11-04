@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS openings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    venue_id TEXT NOT NULL,
+    venue_name TEXT,
+    slot_date TEXT NOT NULL,          -- YYYY-MM-DD (venue local)
+    slot_time TEXT NOT NULL,          -- HH:MM (venue local)
+    seen_at TEXT NOT NULL,            -- ISO UTC when Rezzie first saw it
+    seen_hour INTEGER NOT NULL,       -- local hour of day when seen (0-23)
+    hours_before REAL NOT NULL        -- hours between seen_at and the slot
+);
 CREATE TABLE IF NOT EXISTS usage (
     day TEXT NOT NULL,
     platform TEXT NOT NULL,
@@ -213,6 +224,46 @@ def kv_set(key: str, value: Any) -> None:
 def kv_delete(key: str) -> None:
     with _lock:
         conn().execute("DELETE FROM kv WHERE key=?", (key,))
+
+
+# ---------------------------------------------------------------- openings
+
+def record_opening(platform: str, venue_id: str, venue_name: str, slot_date: str, slot_time: str,
+                   seen_hour: int, hours_before: float) -> None:
+    with _lock:
+        conn().execute(
+            "INSERT INTO openings (platform, venue_id, venue_name, slot_date, slot_time, seen_at, seen_hour, hours_before)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (platform, venue_id, venue_name, slot_date, slot_time, now_iso(), seen_hour, round(hours_before, 2)),
+        )
+
+
+HOURS_BEFORE_BUCKETS = [(0, 6, "0–6h"), (6, 12, "6–12h"), (12, 24, "12–24h"), (24, 48, "1–2d"),
+                        (48, 72, "2–3d"), (72, 168, "3–7d"), (168, 10**9, "7d+")]
+
+
+def opening_stats(platform: str | None = None) -> dict[str, Any]:
+    sql = "SELECT seen_hour, hours_before FROM openings"
+    args: list[Any] = []
+    if platform:
+        sql += " WHERE platform=?"
+        args.append(platform)
+    with _lock:
+        rows = conn().execute(sql, args).fetchall()
+    by_hour = [0] * 24
+    by_before = [0] * len(HOURS_BEFORE_BUCKETS)
+    for r in rows:
+        by_hour[int(r["seen_hour"]) % 24] += 1
+        hb = float(r["hours_before"])
+        for i, (lo, hi, _) in enumerate(HOURS_BEFORE_BUCKETS):
+            if lo <= hb < hi:
+                by_before[i] += 1
+                break
+    return {
+        "total": len(rows),
+        "by_hour": by_hour,
+        "by_hours_before": [{"label": b[2], "count": c} for b, c in zip(HOURS_BEFORE_BUCKETS, by_before)],
+    }
 
 
 # ------------------------------------------------------------------- usage

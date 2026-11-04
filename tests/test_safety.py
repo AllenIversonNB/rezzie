@@ -26,28 +26,6 @@ def test_fixed_snipe_reserve_and_settings_override():
     assert (daily_budget("resy"), monitor_budget("resy")) == (1500, 1400)
 
 
-def test_pacing_spreads_remaining_budget_until_midnight(gov):
-    from app.safety import awake_seconds_left_today
-    one = gov.pacing_interval("resy", 1)
-    three = gov.pacing_interval("resy", 3)
-    assert three == pytest.approx(one * 3, rel=0.01)
-    assert one == pytest.approx(awake_seconds_left_today() / 800, rel=0.05)
-    db.usage_incr("resy", n=700)  # most of today's budget gone -> much slower
-    assert gov.pacing_interval("resy", 1) > one * 5
-    db.usage_incr("resy", n=100)
-    assert gov.pacing_interval("resy", 1) == float("inf")
-
-
-def test_quiet_hours_count_quarter_weight():
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from app.safety import awake_seconds_left_today
-    settings.quiet_hours = "01-07"
-    tz = ZoneInfo(settings.app_timezone)
-    # From 00:00: 1h awake + 6h quiet (=1.5h) + 17h awake = 19.5h
-    assert awake_seconds_left_today(datetime(2026, 11, 4, 0, 0, tzinfo=tz)) == pytest.approx(19.5 * 3600)
-
-
 @pytest.mark.asyncio
 async def test_pause_and_resume(gov):
     gov.rate_limited("sevenrooms")

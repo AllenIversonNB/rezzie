@@ -157,3 +157,19 @@ input[type="checkbox"] { width: auto; min-height: 0; }
 .login h2 { font-size: 34px; margin: 0 0 6px; }
 .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff6; border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Insights bar charts: single series, thin rounded bars, recessive baseline */
+.chart { margin-top: 14px; }
+.chart-title { font-weight: 600; font-size: 15px; }
+.chart-readout { font-size: 13px; color: var(--text); margin: 6px 0 4px; min-height: 18px; font-variant-numeric: tabular-nums; }
+.chart-bars { display: flex; align-items: flex-end; gap: 2px; height: 96px; border-bottom: 1px solid var(--line); }
+.chart-col { flex: 1; height: 100%; display: flex; align-items: flex-end; background: none; border: 0; padding: 0; min-width: 0; cursor: pointer; }
+.chart-col:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chart-bar { display: block; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+.chart-col:hover .chart-bar { filter: brightness(1.2); }
+.chart-ticks { display: flex; gap: 2px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.chart-ticks span { flex: 1; min-width: 0; white-space: nowrap; overflow: visible; }
+.chart-table { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.chart-table table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.chart-table td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.chart-table td:last-child { text-align: right; }

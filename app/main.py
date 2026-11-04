@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from . import db, security
+from . import hotness as hotness_mod
 from .config import settings
 from .engine import engine
 from .notify import push
@@ -128,16 +129,18 @@ async def status():
     active = db.list_requests(["monitoring"])
     for p in ("resy", "sevenrooms"):
         pu = governor.paused_until(p)
-        cost = engine.platform_round_cost(p)
-        pace = governor.pacing_interval(p, cost) if cost else None
+        n_active = sum(1 for r in active if r["platform"] == p)
+        pace = engine.plan(p)["pace"] if n_active else None
         platforms[p] = {
             "calls_today": db.usage_get(p),
             "budget": daily_budget(p),
             "monitor_budget": monitor_budget(p),
-            "active_monitors": sum(1 for r in active if r["platform"] == p),
+            "active_monitors": n_active,
             # Typical daytime gap between checks of each monitor right now.
-            "pace_seconds": (None if pace is None else
-                             (None if pace == float("inf") else round(max(settings.min_poll_seconds, pace)))),
+            # Typical gap between checks of one monitor (default 2-min setting), by window.
+            "intervals": (None if pace is None or pace == float("inf") else {
+                k: round(max(settings.min_poll_seconds, 120 / w, pace / w))
+                for k, w in (("hot", 3.0), ("normal", 1.0), ("overnight", 0.2))}),
             "budget_exhausted": pace == float("inf"),
             "paused_until": pu if pu > time.time() else None,
             "pause_reason": governor.pause_reason(p) if pu > time.time() else None,
@@ -171,6 +174,12 @@ async def resume_platform(platform: Literal["resy", "sevenrooms"]):
     governor.resume(platform)
     db.log_event(None, f"{platform}: pause cleared manually")
     return {"ok": True}
+
+
+@app.get("/api/insights", dependencies=[Depends(require_auth)])
+async def insights(platform: str | None = None):
+    """When have tables opened up? Built from every new slot monitors have seen."""
+    return db.opening_stats(platform)
 
 
 @app.get("/api/events", dependencies=[Depends(require_auth)])
@@ -430,7 +439,13 @@ async def get_request(rid: str):
     r = db.get_request(rid)
     if not r:
         raise HTTPException(404, "Not found")
-    return {**r, "events": db.list_events(rid, 200)}
+    out = {**r, "events": db.list_events(rid, 200)}
+    if r["status"] == "monitoring":
+        w = hotness_mod.hotness(r)
+        out["hotness"] = round(w, 2)
+        out["hotness_label"] = hotness_mod.label(w)
+        out["cutoff_hours"] = hotness_mod.cutoff_hours(r)
+    return out
 
 
 @app.put("/api/requests/{rid}", dependencies=[Depends(require_auth)])
