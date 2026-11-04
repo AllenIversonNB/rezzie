@@ -317,10 +317,9 @@ function sw(title, sub, checked, onChange) {
 }
 
 function blankDraft() {
-  const d = addDays(todayLocal(), 14);
   return {
     platform: "resy", mode: "snipe", venue: null,
-    party_size: 2, dates: [d], time_start: "18:30", time_end: "21:00", ideal_time: "19:30",
+    party_size: 2, dates: [], time_start: "18:30", time_end: "21:00", ideal_time: "19:30",
     seating_exclude: "", auto_book: true, release_local: "", snipe_window_seconds: 45,
     fallback_to_monitor: true, poll_interval_seconds: 120, monitor_until: "", notes: "",
   };
@@ -428,14 +427,24 @@ function configForm(d, editId) {
 
   // Dates
   const chips = el("div", { class: "chips" });
-  const drawChips = () => chips.replaceChildren(...d.dates.map(x => el("span", { class: "chip" }, fmtDate(x), el("button", { type: "button", "aria-label": "remove", onclick: () => { d.dates = d.dates.filter(y => y !== x); drawChips(); } }, "×"))));
+  const drawChips = () => chips.replaceChildren(...(!d.dates.length ? [el("span", { class: "muted small" }, "No dates yet. Pick one above.")] : []), ...d.dates.map(x => el("span", { class: "chip" }, fmtDate(x), el("button", { type: "button", "aria-label": "remove", onclick: () => { d.dates = d.dates.filter(y => y !== x); drawChips(); } }, "×"))));
   drawChips();
-  const dateIn = el("input", { type: "date", min: todayLocal(), onchange: e => {
-    const x = e.target.value;
-    if (x && isOT) { d.dates = [x]; drawChips(); }
-    else if (x && !d.dates.includes(x)) { d.dates = [...d.dates, x].sort(); drawChips(); if (d.mode === "snipe" && isResy && d.dates.length === 1) suggestRelease(); }
-    e.target.value = "";
-  } });
+  // Add a date only once the picker is closed. iPhone Safari fills an empty
+  // date field with *today* (and fires "change") the moment it opens, so acting
+  // on "change" used to add today on top of the date you actually picked.
+  const commitDate = input => {
+    const x = input.value;
+    input.value = "";
+    if (!x || x < todayLocal()) return;
+    if (isOT) { d.dates = [x]; drawChips(); }
+    else if (!d.dates.includes(x)) { d.dates = [...d.dates, x].sort(); drawChips(); if (d.mode === "snipe" && isResy && d.dates.length === 1) suggestRelease(); }
+  };
+  const dateIn = el("input", { type: "date", min: todayLocal(),
+    onblur: e => commitDate(e.target),
+    // Desktop browsers / keyboards: commit on change only if the field isn't
+    // focused any more (otherwise blur will do it).
+    onchange: e => { if (document.activeElement !== e.target) commitDate(e.target); },
+  });
   out.push(el("label", {}, isOT ? "Date" : "Dates (add one or more)"), dateIn, chips);
 
   // Times
