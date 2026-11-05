@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
+from .base import NetworkError
 
 log = logging.getLogger("rezzie.http")
 
@@ -88,7 +89,22 @@ class CurlTransport(Transport):
         if cookies:
             kwargs["cookies"] = cookies
         try:
-            r = await s.request(method, url, **kwargs)
+            try:
+                r = await s.request(method, url, **kwargs)
+            except Exception as e:
+                # The usual culprit is a pooled connection that went stale while
+                # idle (the network silently dropped it): the request vanishes and
+                # nothing comes back. Throw the pool away; retry reads once on a
+                # fresh connection. Never auto-retry writes (could double-submit).
+                await self.close()
+                if method != "GET":
+                    raise self._net_error(e, url, timeout) from e
+                log.info("retrying %s on a fresh connection after: %s", url, e)
+                try:
+                    r = await (await self._get()).request(method, url, **kwargs)
+                except Exception as e2:
+                    await self.close()
+                    raise self._net_error(e2, url, timeout) from e2
         finally:
             if mime is not None:
                 mime.close()
@@ -98,7 +114,24 @@ class CurlTransport(Transport):
             ck = dict(r.cookies) if r.cookies else {}
         return Response(status=r.status_code, text=r.text, headers=dict(r.headers), cookies=ck)
 
+    @staticmethod
+    def _net_error(e: Exception, url: str, timeout: float) -> NetworkError:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).hostname or url
+        text = str(e)
+        if "timed out" in text.lower() or "(28)" in text:
+            return NetworkError(f"No response from {host} within {timeout:g}s")
+        return NetworkError(f"Couldn't reach {host}: {text.split('. See')[0][:160]}")
+
     async def close(self) -> None:
         if self._session is not None:
-            await self._session.close()
-            self._session = None
+            s, self._session = self._session, None
+            try:
+                await s.close()
+            except Exception:
+                pass
+
+    async def reset(self) -> None:
+        """Drop pooled connections so the next request starts fresh."""
+        await self.close()

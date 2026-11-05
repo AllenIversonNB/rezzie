@@ -32,7 +32,18 @@ from typing import Any
 from .. import db, security
 from ..config import settings
 from ..safety import Governor, governor as default_governor
-from .base import Blocked, Booking, PaymentRequired, PlatformError, RateLimited, Slot, SlotGone, Venue
+from .base import (
+    Blocked,
+    Booking,
+    BookingUnclear,
+    NetworkError,
+    PaymentRequired,
+    PlatformError,
+    RateLimited,
+    Slot,
+    SlotGone,
+    Venue,
+)
 from .http import CurlTransport, Transport
 
 PLATFORM = "sevenrooms"
@@ -123,8 +134,12 @@ class SevenRoomsClient:
             headers["Origin"] = BASE
         if json_body is not None:
             headers["Content-Type"] = "application/json"
-        r = await self.t.request(method, BASE + path, params=params, json_body=json_body,
-                                 multipart=multipart, headers=headers, timeout=20.0 if booking else 10.0)
+        try:
+            r = await self.t.request(method, BASE + path, params=params, json_body=json_body,
+                                     multipart=multipart, headers=headers, timeout=20.0 if booking else 10.0)
+        except NetworkError:
+            self.gov.network_error(PLATFORM, urgent=urgent)
+            raise
         low = r.text[:500].lower()
         if r.status == 429:
             self.gov.rate_limited(PLATFORM)
@@ -273,6 +288,9 @@ class SevenRoomsClient:
         try:
             r = await self._req("POST", f"/booking/dining/widget/{slug}/book", multipart=form, urgent=True,
                                 referer_slug=slug, booking=True)
+        except NetworkError as e:
+            raise BookingUnclear(f"SevenRooms didn't answer the booking request ({e}). It may have gone "
+                                 "through: check your email before booking again") from e
         except PlatformError as e:
             if isinstance(e, (Blocked, RateLimited, NeedsHuman)):
                 raise

@@ -79,3 +79,13 @@ class SlotGone(PlatformError):
 
 class PaymentRequired(PlatformError):
     """Venue needs a card on file / deposit (402)."""
+
+
+class NetworkError(PlatformError):
+    """No usable response: timeout, connection reset, DNS... Retryable."""
+
+
+class BookingUnclear(PaymentRequired):
+    """The final booking request got no answer: it may or may not have gone
+    through. Never retry automatically (that risks a double booking); a human
+    checks email / the app and finishes if needed."""

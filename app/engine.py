@@ -138,7 +138,13 @@ class Engine:
             nxt = parse_iso(req.get("next_check_at"))
             if nxt and nxt > utcnow():
                 continue
-            await self.check_monitor(req["id"])
+            try:
+                await self.check_monitor(req["id"])
+            except Exception as e:
+                log.exception("check_monitor crashed")
+                nxt = utcnow() + timedelta(seconds=random.uniform(240, 420))
+                db.update_request(req["id"], next_check_at=nxt.isoformat(timespec="seconds"))
+                db.log_event(req["id"], f"check crashed: {e!r} — next try in ~5 min", "warn")
 
     # ------------------------------------------------------------ helpers
     def _client_find(self, req: dict[str, Any]):
@@ -264,6 +270,37 @@ class Engine:
                    link=link, priority=5, tags=["rotating_light"], request_id=rid)
         db.update_request(rid, status="notified", found_link=link)
 
+    def _transport(self, platform: str):
+        return (self.resy if platform == "resy" else self.sr).t
+
+    async def _warm_up(self, req: dict[str, Any], release: datetime) -> None:
+        """Make sure the connection is live at T-0.
+
+        T-60s: drop pooled connections (an idle one may have been silently
+        dropped by the network — that is what a 0-bytes timeout at T-0 looks
+        like). T-15s: one ordinary search, like refreshing the page before a
+        drop, which opens a fresh connection and proves the platform answers.
+        """
+        rid = req["id"]
+        t60 = release - timedelta(seconds=60)
+        if t60 > utcnow():
+            await self._sleep_until(t60)
+        try:
+            await self._transport(req["platform"]).reset()
+        except Exception:
+            pass
+        t15 = release - timedelta(seconds=15)
+        if t15 <= utcnow():
+            return
+        await self._sleep_until(t15)
+        started = time.monotonic()
+        try:
+            await self._client_find(req)((req["dates"] or [""])[0], urgent=True)
+            db.log_event(rid, f"Warm-up OK — {PLATFORM_NAMES[req['platform']]} answered in "
+                              f"{(time.monotonic() - started) * 1000:.0f} ms")
+        except Exception as e:
+            db.log_event(rid, f"Warm-up problem: {e} — will still fire at release", "warn")
+
     async def _run_snipe(self, req: dict[str, Any], release: datetime) -> None:
         rid = req["id"]
         # 1) Pre-flight a few minutes early: make sure login + card are good,
@@ -292,6 +329,7 @@ class Engine:
         window = req.get("snipe_window_seconds") or settings.snipe_window_seconds
         lead = max(0.0, (release - utcnow()).total_seconds())
         governor.hold(req["platform"], lead + window + 30)
+        await self._warm_up(req, release)
         await self._sleep_until(release + timedelta(milliseconds=50))
         req = db.get_request(rid)
         if not req or req["status"] != "scheduled":
@@ -302,6 +340,7 @@ class Engine:
         deadline = time.monotonic() + window
         find = self._client_find(req)
         attempts = 0
+        unexpected = 0
         day_cycle = req["dates"] or []
         while time.monotonic() < deadline:
             day = day_cycle[attempts % len(day_cycle)]
@@ -325,8 +364,14 @@ class Engine:
                 await push("Snipe failed: login", f"{req['venue_name']}: {e}", priority=4,
                            tags=["warning"], request_id=rid)
                 return
-            except PlatformError as e:
-                db.log_event(rid, f"attempt {attempts}: {e}", "warn")
+            except PlatformError as e:  # incl. timeouts: just try again
+                db.log_event(rid, f"attempt {attempts}: {e} — retrying", "warn")
+            except Exception as e:  # never let one odd failure end the snipe
+                unexpected += 1
+                log.exception("snipe attempt failed")
+                db.log_event(rid, f"attempt {attempts}: unexpected error {e!r} — retrying", "warn")
+                if unexpected >= 5:
+                    raise
             await asyncio.sleep(random.uniform(settings.snipe_min_interval_ms, settings.snipe_max_interval_ms) / 1000)
 
         db.log_event(rid, f"No matching table in the {window}s release window ({attempts} checks)")
@@ -408,9 +453,13 @@ class Engine:
             await push("Monitor paused: login", f"{req['venue_name']}: {e}", priority=4,
                        tags=["warning"], request_id=rid)
             return
-        except PlatformError as e:
+        except PlatformError as e:  # incl. timeouts
             db.update_request(rid, last_error=str(e))
             db.log_event(rid, f"check failed: {e}", "warn")
+        except Exception as e:  # unexpected: log it, but keep the normal cadence
+            log.exception("monitor check failed")
+            db.update_request(rid, last_error=f"Unexpected error: {e!r}")
+            db.log_event(rid, f"check failed (unexpected): {e!r}", "warn")
         nxt = utcnow() + timedelta(seconds=interval)
         db.update_request(rid, next_check_at=nxt.isoformat(timespec="seconds"))
 

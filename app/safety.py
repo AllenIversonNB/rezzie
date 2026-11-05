@@ -34,6 +34,7 @@ class _State:
     next_free: float = 0.0
     hold_until: float = 0.0
     strikes: int = 0
+    net_errors: int = 0
 
 
 # Calls held back each day for snipes (a snipe uses ~20-40). Monitors get the rest.
@@ -133,7 +134,23 @@ class Governor:
 
     # -------------------------------------------------------------- report
     def ok(self, platform: str) -> None:
-        self._st(platform).strikes = 0
+        st = self._st(platform)
+        st.strikes = 0
+        st.net_errors = 0
+
+    def network_error(self, platform: str, urgent: bool = False) -> float | None:
+        """Count background requests that got no answer. Four in a row looks
+        like the platform is overloaded or quietly ignoring us: cool off 15 min.
+        Snipe (urgent) requests never trigger this — they just retry."""
+        if urgent:
+            return None
+        st = self._st(platform)
+        st.net_errors += 1
+        if st.net_errors >= 4:
+            st.net_errors = 0
+            return self.pause(platform, 900 * random.uniform(1.0, 1.2),
+                              f"{platform} stopped responding (repeated timeouts)")
+        return None
 
     def rate_limited(self, platform: str) -> float:
         st = self._st(platform)

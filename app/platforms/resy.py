@@ -29,6 +29,8 @@ from .base import (
     AuthError,
     Blocked,
     Booking,
+    BookingUnclear,
+    NetworkError,
     PaymentRequired,
     PlatformError,
     RateLimited,
@@ -147,11 +149,15 @@ class ResyClient:
                     params: dict | None = None, form: dict | None = None, json_body: Any = None,
                     cookies: dict | None = None, timeout: float = 10.0, book: bool = False):
         await self.gov.acquire(PLATFORM, urgent=urgent)
-        r = await self.t.request(
-            method, BASE + path,
-            headers=self._headers(auth=auth, form=form is not None, json_body=json_body is not None),
-            params=params, data=form, json_body=json_body, cookies=cookies, timeout=timeout,
-        )
+        try:
+            r = await self.t.request(
+                method, BASE + path,
+                headers=self._headers(auth=auth, form=form is not None, json_body=json_body is not None),
+                params=params, data=form, json_body=json_body, cookies=cookies, timeout=timeout,
+            )
+        except NetworkError:
+            self.gov.network_error(PLATFORM, urgent=urgent)
+            raise
         s = r.status
         body_l = r.text[:400].lower()
         if 200 <= s < 300:
@@ -412,7 +418,11 @@ class ResyClient:
             form["struct_payment_method"] = json.dumps({"id": pm})
 
         async def _book():
-            return await self._call("POST", "/3/book", urgent=True, book=True, form=form, timeout=20.0)
+            try:
+                return await self._call("POST", "/3/book", urgent=True, book=True, form=form, timeout=20.0)
+            except NetworkError as e:
+                raise BookingUnclear(f"Resy didn't answer the booking request ({e}). It may have gone "
+                                     "through: check the Resy app before booking again") from e
 
         r = (await self._authed(_book)).json()
         conf = r.get("reservation_id") or r.get("resy_token")
